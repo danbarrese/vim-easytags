@@ -244,6 +244,7 @@ function! s:prep_cmdline(cfile, arguments) " {{{3
     let cmdline = [xolox#easytags#ctags_command()]
     call add(cmdline, '--fields=+l')
     call add(cmdline, '--c-kinds=+p')
+    call add(cmdline, '--java-kinds=+lf') " Dan Barrese 2015.03.03 01:08:17
     call add(cmdline, '--c++-kinds=+p')
     call add(cmdline, '--sort=no')
     call add(cmdline, '-f-')
@@ -303,82 +304,87 @@ function! xolox#easytags#highlight() " {{{2
       let starttime = xolox#misc#timer#start()
       let used_python = 0
       for tagkind in tagkinds
-        let hlgroup_tagged = tagkind.hlgroup . 'Tag'
-        " Define style on first run, clear highlighting on later runs.
-        if !hlexists(hlgroup_tagged)
-          execute 'highlight def link' hlgroup_tagged tagkind.hlgroup
-        else
-          execute 'syntax clear' hlgroup_tagged
-        endif
-        " Try to perform the highlighting using the fast Python script.
-        " TODO The tags files are read multiple times by the Python script
-        "      within one run of xolox#easytags#highlight()
-        if s:highlight_with_python(hlgroup_tagged, tagkind)
-          let used_python = 1
-        else
-          " Fall back to the slow and naive Vim script implementation.
-          if !exists('taglist')
-            " Get the list of tags when we need it and remember the results.
-            let ctags_filetypes = xolox#easytags#filetypes#find_ctags_aliases(filetype)
-            let filetypes_pattern = printf('^\(%s\)$', join(map(ctags_filetypes, 'xolox#misc#escape#pattern(v:val)'), '\|'))
-            call g:xolox#easytags#syntax_filter_stage_1_timer.start()
-            let taglist = filter(taglist('.'), "get(v:val, 'language', '') =~? filetypes_pattern")
-            call g:xolox#easytags#syntax_filter_stage_1_timer.stop()
-          endif
-          " Filter a copy of the list of tags to the relevant kinds.
-          if has_key(tagkind, 'tagkinds')
-            let filter = 'v:val.kind =~ tagkind.tagkinds'
+        " Conditionally process hlgroup. Dan Barrese 2015.03.11 17:35:03
+        if has_key(tagkind, "hlgroup") && tagkind.hlgroup != ''
+          let hlgroup_tagged = tagkind.hlgroup . 'Tag'
+          " Define style on first run, clear highlighting on later runs.
+          if !hlexists(hlgroup_tagged)
+            "execute 'highlight def link' hlgroup_tagged tagkind.hlgroup
+            " Use hi link instead. Dan Barrese 2015.03.11 17:35:21
+            execute 'hi link' hlgroup_tagged tagkind.hlgroup
           else
-            let filter = tagkind.vim_filter
+            execute 'syntax clear' hlgroup_tagged
           endif
-          call g:xolox#easytags#syntax_filter_stage_2_timer.start()
-          let matches = filter(copy(taglist), filter)
-          call g:xolox#easytags#syntax_filter_stage_2_timer.stop()
-          if matches != []
-            " Convert matched tags to :syntax commands and execute them.
-            let use_keywords_when = xolox#misc#option#get('easytags_syntax_keyword', 'auto')
-            let has_default_pattern_prefix = (tagkind.pattern_prefix == g:xolox#easytags#default_pattern_prefix)
-            let has_default_pattern_suffix = (tagkind.pattern_suffix == g:xolox#easytags#default_pattern_suffix)
-            let has_non_default_patterns = !(has_default_pattern_prefix && has_default_pattern_suffix)
-            if use_keywords_when == 'always' || (use_keywords_when == 'auto' && !has_non_default_patterns)
-              " Vim's ":syntax keyword" command doesn't use the regular
-              " expression engine and the resulting syntax highlighting is
-              " therefor much faster. Because of this we use the syntax
-              " keyword command when 1) we can do so without sacrificing
-              " accuracy or 2) the user explicitly chose to sacrifice
-              " accuracy in order to make the highlighting faster.
-              call g:xolox#easytags#syntax_keyword_timer.start()
-              let keywords = {}
-              for tag in matches
-                if s:is_keyword_compatible(tag)
-                  let keywords[tag.name] = 1
-                endif
-              endfor
-              if !empty(keywords)
-                let template = 'syntax keyword %s %s containedin=ALLBUT,%s'
-                let command = printf(template, hlgroup_tagged, join(keys(keywords)), xolox#easytags#syntax_groups_to_ignore())
-                call xolox#misc#msg#debug("easytags.vim %s: Executing command '%s'.", g:xolox#easytags#version, command)
-                execute command
-                " Remove the tags that we just highlighted from the list of
-                " tags that still need to be highlighted.
-                call filter(matches, "!s:is_keyword_compatible(v:val)")
-              endif
-              call g:xolox#easytags#syntax_keyword_timer.stop()
+          " Try to perform the highlighting using the fast Python script.
+          " TODO The tags files are read multiple times by the Python script
+          "      within one run of xolox#easytags#highlight()
+          if s:highlight_with_python(hlgroup_tagged, tagkind)
+            let used_python = 1
+          else
+            " Fall back to the slow and naive Vim script implementation.
+            if !exists('taglist')
+              " Get the list of tags when we need it and remember the results.
+              let ctags_filetypes = xolox#easytags#filetypes#find_ctags_aliases(filetype)
+              let filetypes_pattern = printf('^\(%s\)$', join(map(ctags_filetypes, 'xolox#misc#escape#pattern(v:val)'), '\|'))
+              call g:xolox#easytags#syntax_filter_stage_1_timer.start()
+              let taglist = filter(taglist('.'), "get(v:val, 'language', '') =~? filetypes_pattern")
+              call g:xolox#easytags#syntax_filter_stage_1_timer.stop()
             endif
-            if !empty(matches)
-              call g:xolox#easytags#syntax_match_timer.start()
-              let matches = xolox#misc#list#unique(map(matches, 'xolox#misc#escape#pattern(get(v:val, "name"))'))
-              let pattern = tagkind.pattern_prefix . '\%(' . join(matches, '\|') . '\)' . tagkind.pattern_suffix
-              let template = 'syntax match %s /%s/ containedin=ALLBUT,%s'
-              let command = printf(template, hlgroup_tagged, escape(pattern, '/'), xolox#easytags#syntax_groups_to_ignore())
-              call xolox#misc#msg#debug("easytags.vim %s: Executing command '%s'.", g:xolox#easytags#version, command)
-              try
-                execute command
-              catch /^Vim\%((\a\+)\)\=:E339/
-                let msg = "easytags.vim %s: Failed to highlight %i %s tags because pattern is too big! (%i KB)"
-                call xolox#misc#msg#warn(msg, g:xolox#easytags#version, len(matches), tagkind.hlgroup, len(pattern) / 1024)
-              endtry
-              call g:xolox#easytags#syntax_match_timer.stop()
+            " Filter a copy of the list of tags to the relevant kinds.
+            if has_key(tagkind, 'tagkinds')
+              let filter = 'v:val.kind =~ tagkind.tagkinds'
+            else
+              let filter = tagkind.vim_filter
+            endif
+            call g:xolox#easytags#syntax_filter_stage_2_timer.start()
+            let matches = filter(copy(taglist), filter)
+            call g:xolox#easytags#syntax_filter_stage_2_timer.stop()
+            if matches != []
+              " Convert matched tags to :syntax commands and execute them.
+              let use_keywords_when = xolox#misc#option#get('easytags_syntax_keyword', 'auto')
+              let has_default_pattern_prefix = (tagkind.pattern_prefix == g:xolox#easytags#default_pattern_prefix)
+              let has_default_pattern_suffix = (tagkind.pattern_suffix == g:xolox#easytags#default_pattern_suffix)
+              let has_non_default_patterns = !(has_default_pattern_prefix && has_default_pattern_suffix)
+              if use_keywords_when == 'always' || (use_keywords_when == 'auto' && !has_non_default_patterns)
+                " Vim's ":syntax keyword" command doesn't use the regular
+                " expression engine and the resulting syntax highlighting is
+                " therefor much faster. Because of this we use the syntax
+                " keyword command when 1) we can do so without sacrificing
+                " accuracy or 2) the user explicitly chose to sacrifice
+                " accuracy in order to make the highlighting faster.
+                call g:xolox#easytags#syntax_keyword_timer.start()
+                let keywords = {}
+                for tag in matches
+                  if s:is_keyword_compatible(tag)
+                    let keywords[tag.name] = 1
+                  endif
+                endfor
+                if !empty(keywords)
+                  let template = 'syntax keyword %s %s containedin=ALLBUT,%s'
+                  let command = printf(template, hlgroup_tagged, join(keys(keywords)), xolox#easytags#syntax_groups_to_ignore())
+                  call xolox#misc#msg#debug("easytags.vim %s: Executing command '%s'.", g:xolox#easytags#version, command)
+                  execute command
+                  " Remove the tags that we just highlighted from the list of
+                  " tags that still need to be highlighted.
+                  call filter(matches, "!s:is_keyword_compatible(v:val)")
+                endif
+                call g:xolox#easytags#syntax_keyword_timer.stop()
+              endif
+              if !empty(matches)
+                call g:xolox#easytags#syntax_match_timer.start()
+                let matches = xolox#misc#list#unique(map(matches, 'xolox#misc#escape#pattern(get(v:val, "name"))'))
+                let pattern = tagkind.pattern_prefix . '\%(' . join(matches, '\|') . '\)' . tagkind.pattern_suffix
+                let template = 'syntax match %s /%s/ containedin=ALLBUT,%s'
+                let command = printf(template, hlgroup_tagged, escape(pattern, '/'), xolox#easytags#syntax_groups_to_ignore())
+                call xolox#misc#msg#debug("easytags.vim %s: Executing command '%s'.", g:xolox#easytags#version, command)
+                try
+                  execute command
+                catch /^Vim\%((\a\+)\)\=:E339/
+                  let msg = "easytags.vim %s: Failed to highlight %i %s tags because pattern is too big! (%i KB)"
+                  call xolox#misc#msg#warn(msg, g:xolox#easytags#version, len(matches), tagkind.hlgroup, len(pattern) / 1024)
+                endtry
+                call g:xolox#easytags#syntax_match_timer.stop()
+              endif
             endif
           endif
         endif
@@ -808,22 +814,32 @@ highlight def link pythonClassTag pythonFunction
 
 call xolox#easytags#define_tagkind({
       \ 'filetype': 'java',
-      \ 'hlgroup': 'javaClass',
+      \ 'hlgroup': '',
       \ 'tagkinds': 'c'})
 
 call xolox#easytags#define_tagkind({
       \ 'filetype': 'java',
-      \ 'hlgroup': 'javaInterface',
+      \ 'hlgroup': '',
       \ 'tagkinds': 'i'})
 
 call xolox#easytags#define_tagkind({
       \ 'filetype': 'java',
-      \ 'hlgroup': 'javaMethod',
+      \ 'hlgroup': '',
       \ 'tagkinds': 'm'})
 
-highlight def link javaClass Identifier
-highlight def link javaMethod Function
-highlight def link javaInterface Identifier
+" Dan Barrese 2015.03.03 01:01:10
+call xolox#easytags#define_tagkind({
+      \ 'filetype': 'java',
+      \ 'hlgroup': '',
+      \ 'tagkinds': 'l'})
+
+" Dan Barrese 2015.03.03 01:17:31
+call xolox#easytags#define_tagkind({
+      \ 'filetype': 'java',
+      \ 'hlgroup': 'etjavaField',
+      \ 'tagkinds': 'f'})
+
+hi def link etjavaField Field
 
 " C#. {{{2
 
